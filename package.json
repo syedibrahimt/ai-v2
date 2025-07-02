@@ -1,0 +1,25 @@
+{
+  "name": "math-tutoring-system",
+  "version": "1.0.0",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "node server/index.js",
+    "client": "cd client && npm start",
+    "install-all": "pnpm install && cd client && pnpm install",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["ai", "tutoring", "voice", "mastra", "math"],
+  "author": "",
+  "license": "ISC",
+  "description": "Real-time AI math tutoring system with voice capabilities",
+  "dependencies": {
+    "@mastra/core": "latest",
+    "@mastra/voice-openai-realtime": "latest", 
+    "@mastra/node-audio": "latest",
+    "@ai-sdk/openai": "latest",
+    "express": "^4.18.0",
+    "socket.io": "^4.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.0"
+  }
+}
