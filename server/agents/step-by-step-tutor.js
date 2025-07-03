@@ -1,10 +1,12 @@
-const { Agent } = require('@mastra/core');
-const { OpenAIRealtimeVoice } = require('@mastra/voice-openai-realtime');
+import { Agent } from '@mastra/core';
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime';
+import { openai } from '@ai-sdk/openai';
 
 class StepByStepTutorAgent extends Agent {
   constructor() {
     super({
       name: 'step-by-step-tutor',
+      model: openai('gpt-4o-mini-realtime'),
       instructions: `You are a patient and encouraging math tutor. Your role is to:
       
       1. Break down complex problems into manageable steps
@@ -29,55 +31,63 @@ class StepByStepTutorAgent extends Agent {
         model: 'gpt-4o-mini-realtime'
       })
     });
+    
+    this.voiceConnected = false;
+    this.currentSession = null;
   }
 
-  async processMessage(message, context) {
-    const response = await this.generateTutoringResponse(message, context);
-    
-    const shouldTransitionToQuestionPresenter = this.shouldTransitionToQuestionPresenter(message, response);
-    const shouldTransitionToWelcomer = this.shouldTransitionToWelcomer(message);
-    
-    return {
-      response,
-      shouldTransition: shouldTransitionToQuestionPresenter || shouldTransitionToWelcomer,
-      nextAgent: shouldTransitionToQuestionPresenter ? 'question-presenter' : 
-                 shouldTransitionToWelcomer ? 'welcomer' : null,
-      context: {
-        ...context,
-        tutoringStep: this.extractCurrentStep(response),
-        studentProgress: this.assessProgress(message, context)
+  async initializeVoice(socket) {
+    if (!this.voiceConnected) {
+      try {
+        await this.voice.connect();
+        this.voiceConnected = true;
+        this.currentSession = socket;
+        
+        this.setupVoiceEvents();
+        
+        console.log('StepByStepTutorAgent voice connected');
+      } catch (error) {
+        console.error('Failed to connect StepByStepTutorAgent voice:', error);
       }
-    };
+    }
   }
 
-  async generateTutoringResponse(message, context) {
-    const problem = context.currentProblem;
-    const studentLevel = context.studentLevel;
-    
-    // Customize response based on the type of problem and student's confusion
-    const prompt = this.buildTutoringPrompt(message, problem, studentLevel, context);
-    
-    return await this.generateResponse(message, {
-      ...context,
-      customPrompt: prompt
+  setupVoiceEvents() {
+    this.voice.on("speaker", ({ audio }) => {
+      if (this.currentSession) {
+        this.currentSession.emit('audio-response', {
+          audioData: audio,
+          agent: 'step-by-step-tutor'
+        });
+      }
+    });
+
+    this.voice.on("writing", ({ text, role }) => {
+      if (this.currentSession && role === 'assistant') {
+        this.currentSession.emit('transcription', {
+          text: text,
+          speaker: 'step-by-step-tutor'
+        });
+        
+        // Check for transitions back to question presenter
+        const shouldTransitionToQuestionPresenter = this.shouldTransitionToQuestionPresenter('', text);
+        if (shouldTransitionToQuestionPresenter) {
+          this.currentSession.emit('agent-transition', {
+            nextAgent: 'question-presenter',
+            reason: 'problem_solved'
+          });
+        }
+      }
     });
   }
 
-  buildTutoringPrompt(message, problem, studentLevel, context) {
-    return `
-    Student is working on: ${problem || 'a math problem'}
-    Student level: ${studentLevel?.grade ? `Grade ${studentLevel.grade}` : 'Not specified'}
-    Student just said: "${message}"
-    
-    Provide step-by-step guidance. Break down the solution into small, manageable steps.
-    Check their understanding frequently. Be encouraging and patient.
-    
-    If this is the first time helping with this problem, start by asking what part they're confused about.
-    If they've made progress, acknowledge it and guide them to the next step.
-    
-    Remember: Don't give the answer directly - guide them to discover it themselves.
-    `;
+
+  async startConversation(context) {
+    if (this.voiceConnected && this.voice) {
+      await this.voice.speak("I'm here to help you work through this step by step. Let's break down the problem together. What part are you having trouble with?");
+    }
   }
+
 
   shouldTransitionToQuestionPresenter(message, response) {
     const completionPhrases = [
@@ -191,4 +201,4 @@ class StepByStepTutorAgent extends Agent {
   }
 }
 
-module.exports = { StepByStepTutorAgent };
+export { StepByStepTutorAgent };

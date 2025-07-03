@@ -15,16 +15,12 @@ function App() {
   const [agentInfo, setAgentInfo] = useState({});
   const [conversation, setConversation] = useState([]);
   const [currentProblem, setCurrentProblem] = useState('');
-  const [isRecording, setIsRecording] = useState(false);
-  const [audioLevel, setAudioLevel] = useState(0);
   const [error, setError] = useState(null);
-  
-  const mediaRecorderRef = useRef(null);
-  const audioStreamRef = useRef(null);
+  const [voiceMode, setVoiceMode] = useState(true);
 
   useEffect(() => {
     // Initialize socket connection
-    const newSocket = io('http://localhost:3000');
+    const newSocket = io('http://localhost:3001');
     setSocket(newSocket);
 
     // Socket event listeners
@@ -68,8 +64,14 @@ function App() {
     });
 
     newSocket.on('audio-response', (data) => {
-      // Play audio response
-      playAudioResponse(data.audioData);
+      // Play audio response using the global function
+      if (window.playAudioResponse) {
+        window.playAudioResponse(data.audioData);
+      }
+    });
+
+    newSocket.on('voice-mode-changed', (data) => {
+      setVoiceMode(data.enabled);
     });
 
     newSocket.on('session-ended', () => {
@@ -107,94 +109,13 @@ function App() {
   const endSession = () => {
     if (socket) {
       socket.emit('end-session');
-      stopRecording();
     }
   };
 
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          sampleRate: 44100
-        } 
-      });
-      
-      audioStreamRef.current = stream;
-      
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus'
-      });
-      
-      mediaRecorderRef.current = mediaRecorder;
-      
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && socket) {
-          const reader = new FileReader();
-          reader.onload = () => {
-            socket.emit('audio-data', reader.result);
-          };
-          reader.readAsArrayBuffer(event.data);
-        }
-      };
-      
-      mediaRecorder.start(1000); // Send audio chunks every second
-      setIsRecording(true);
-      
-      // Set up audio level monitoring
-      setupAudioLevelMonitoring(stream);
-      
-    } catch (error) {
-      console.error('Error starting recording:', error);
-      setError('Could not access microphone. Please check permissions.');
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-    
-    if (audioStreamRef.current) {
-      audioStreamRef.current.getTracks().forEach(track => track.stop());
-      audioStreamRef.current = null;
-    }
-    
-    setAudioLevel(0);
-  };
-
-  const setupAudioLevelMonitoring = (stream) => {
-    const audioContext = new AudioContext();
-    const analyser = audioContext.createAnalyser();
-    const microphone = audioContext.createMediaStreamSource(stream);
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-    
-    microphone.connect(analyser);
-    analyser.fftSize = 256;
-    
-    const updateAudioLevel = () => {
-      if (isRecording) {
-        analyser.getByteFrequencyData(dataArray);
-        const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-        setAudioLevel(average);
-        requestAnimationFrame(updateAudioLevel);
-      }
-    };
-    
-    updateAudioLevel();
-  };
-
-  const playAudioResponse = (audioData) => {
-    // Simple audio playback - in a real implementation, you'd handle different audio formats
-    try {
-      const audio = new Audio();
-      const blob = new Blob([audioData], { type: 'audio/wav' });
-      audio.src = URL.createObjectURL(blob);
-      audio.play();
-    } catch (error) {
-      console.error('Error playing audio:', error);
+  const sendMessage = (message) => {
+    if (socket && message.trim()) {
+      socket.emit('user-message', message);
+      addToConversation('You', message);
     }
   };
 
@@ -202,6 +123,13 @@ function App() {
     if (socket) {
       socket.emit('user-message', action);
       addToConversation('You', action);
+    }
+  };
+
+  const toggleVoiceMode = (enabled) => {
+    setVoiceMode(enabled);
+    if (socket) {
+      socket.emit('toggle-voice-mode', enabled);
     }
   };
 
@@ -221,14 +149,14 @@ function App() {
           />
           
           <AudioControls
-            isRecording={isRecording}
-            audioLevel={audioLevel}
             sessionActive={sessionActive}
             onStartSession={startSession}
             onEndSession={endSession}
-            onStartRecording={startRecording}
-            onStopRecording={stopRecording}
+            socket={socket}
+            voiceMode={voiceMode}
+            onToggleVoiceMode={toggleVoiceMode}
           />
+          
           
           <ProgressIndicator currentAgent={currentAgent} />
           

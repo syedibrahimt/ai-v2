@@ -1,10 +1,12 @@
-const { Agent } = require('@mastra/core');
-const { OpenAIRealtimeVoice } = require('@mastra/voice-openai-realtime');
+import { Agent } from '@mastra/core';
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime';
+import { openai } from '@ai-sdk/openai';
 
 class QuestionPresenterAgent extends Agent {
   constructor() {
     super({
       name: 'question-presenter',
+      model: openai('gpt-4o-mini-realtime'),
       instructions: `You are a clear and instructional math teacher. Your role is to:
       
       1. Present math problems appropriate to the student's assessed level
@@ -29,6 +31,9 @@ class QuestionPresenterAgent extends Agent {
       })
     });
     
+    this.voiceConnected = false;
+    this.currentSession = null;
+    
     this.problems = {
       elementary: [
         "What is 15 + 27?",
@@ -51,53 +56,68 @@ class QuestionPresenterAgent extends Agent {
     };
   }
 
-  async processMessage(message, context) {
-    let response;
-    
-    if (this.isFirstInteraction(context)) {
-      response = await this.presentFirstProblem(context);
-    } else {
-      response = await this.handleStudentResponse(message, context);
-    }
-    
-    const shouldTransitionToTutor = this.shouldTransitionToTutor(message);
-    const shouldTransitionToWelcomer = this.shouldTransitionToWelcomer(message);
-    
-    return {
-      response,
-      shouldTransition: shouldTransitionToTutor || shouldTransitionToWelcomer,
-      nextAgent: shouldTransitionToTutor ? 'step-by-step-tutor' : 
-                 shouldTransitionToWelcomer ? 'welcomer' : null,
-      context: {
-        ...context,
-        currentProblem: this.extractCurrentProblem(response),
-        studentAnswer: message
+  async initializeVoice(socket) {
+    if (!this.voiceConnected) {
+      try {
+        await this.voice.connect();
+        this.voiceConnected = true;
+        this.currentSession = socket;
+        
+        this.setupVoiceEvents();
+        
+        console.log('QuestionPresenterAgent voice connected');
+      } catch (error) {
+        console.error('Failed to connect QuestionPresenterAgent voice:', error);
       }
-    };
-  }
-
-  isFirstInteraction(context) {
-    return !context.currentProblem && context.assessmentComplete;
-  }
-
-  async presentFirstProblem(context) {
-    const level = this.determineLevel(context.studentLevel);
-    const problem = this.selectRandomProblem(level);
-    
-    return `Perfect! Based on what you've told me, here's a ${level} level problem for you: ${problem}. 
-    Take your time and let me know what you think!`;
-  }
-
-  async handleStudentResponse(message, context) {
-    const response = await this.generateResponse(message, context);
-    
-    if (this.isCorrectAnswer(message, context.currentProblem)) {
-      const level = this.determineLevel(context.studentLevel);
-      const nextProblem = this.selectRandomProblem(level);
-      return `${response} Excellent work! Ready for another one? ${nextProblem}`;
     }
-    
-    return response;
+  }
+
+  setupVoiceEvents() {
+    this.voice.on("speaker", ({ audio }) => {
+      if (this.currentSession) {
+        this.currentSession.emit('audio-response', {
+          audioData: audio,
+          agent: 'question-presenter'
+        });
+      }
+    });
+
+    this.voice.on("writing", ({ text, role }) => {
+      if (this.currentSession && role === 'assistant') {
+        this.currentSession.emit('transcription', {
+          text: text,
+          speaker: 'question-presenter'
+        });
+        
+        // Check for transitions
+        const shouldTransitionToTutor = this.shouldTransitionToTutor('', text);
+        if (shouldTransitionToTutor) {
+          this.currentSession.emit('agent-transition', {
+            nextAgent: 'step-by-step-tutor',
+            reason: 'needs_help'
+          });
+        }
+      }
+    });
+  }
+
+
+  async startConversation(context) {
+    if (this.voiceConnected && this.voice) {
+      const level = this.determineLevel(context.studentLevel);
+      const problem = this.selectRandomProblem(level);
+      
+      await this.voice.speak(`Perfect! Based on what you've told me, here's a ${level} level problem for you: ${problem}. Take your time and let me know what you think!`);
+    }
+  }
+
+  async presentNextProblem(context) {
+    if (this.voiceConnected && this.voice) {
+      const level = this.determineLevel(context.studentLevel);
+      const problem = this.selectRandomProblem(level);
+      
+      await this.voice.speak(`Excellent work! Ready for another one? ${problem}`);
+    }
   }
 
   shouldTransitionToTutor(message) {
@@ -159,4 +179,4 @@ class QuestionPresenterAgent extends Agent {
   }
 }
 
-module.exports = { QuestionPresenterAgent };
+export { QuestionPresenterAgent };

@@ -1,10 +1,12 @@
-const { Agent } = require('@mastra/core');
-const { OpenAIRealtimeVoice } = require('@mastra/voice-openai-realtime');
+import { Agent } from '@mastra/core';
+import { OpenAIRealtimeVoice } from '@mastra/voice-openai-realtime';
+import { openai } from '@ai-sdk/openai';
 
 class WelcomerAgent extends Agent {
   constructor() {
     super({
       name: 'welcomer',
+      model: openai('gpt-4o-mini-realtime'),
       instructions: `You are a friendly and welcoming math tutor. Your role is to:
       
       1. Greet students warmly and make them feel comfortable
@@ -22,24 +24,66 @@ class WelcomerAgent extends Agent {
         model: 'gpt-4o-mini-realtime'
       })
     });
+    
+    this.voiceConnected = false;
+    this.currentSession = null;
   }
 
-  async processMessage(message, context) {
-    const response = await this.generateResponse(message, context);
-    
-    // Check if we should transition to question presenter
-    const shouldTransition = this.shouldTransitionToQuestionPresenter(message, response);
-    
-    return {
-      response,
-      shouldTransition,
-      nextAgent: shouldTransition ? 'question-presenter' : null,
-      context: {
-        ...context,
-        studentLevel: this.extractStudentLevel(message, response),
-        assessmentComplete: shouldTransition
+  async initializeVoice(socket) {
+    if (!this.voiceConnected) {
+      try {
+        await this.voice.connect();
+        this.voiceConnected = true;
+        this.currentSession = socket;
+        
+        // Set up voice event handlers
+        this.setupVoiceEvents();
+        
+        console.log('WelcomerAgent voice connected');
+      } catch (error) {
+        console.error('Failed to connect WelcomerAgent voice:', error);
       }
-    };
+    }
+  }
+
+  setupVoiceEvents() {
+    // Handle agent speech output
+    this.voice.on("speaker", ({ audio }) => {
+      if (this.currentSession) {
+        this.currentSession.emit('audio-response', {
+          audioData: audio,
+          agent: 'welcomer'
+        });
+      }
+    });
+
+    // Handle conversation events
+    this.voice.on("writing", ({ text, role }) => {
+      if (this.currentSession && role === 'assistant') {
+        // Send transcription for display
+        this.currentSession.emit('transcription', {
+          text: text,
+          speaker: 'welcomer'
+        });
+        
+        // Check for transitions
+        const shouldTransition = this.shouldTransitionToQuestionPresenter('', text);
+        if (shouldTransition) {
+          this.currentSession.emit('agent-transition', {
+            nextAgent: 'question-presenter',
+            reason: 'assessment_complete'
+          });
+        }
+      }
+    });
+  }
+
+
+  async startConversation() {
+    // Start the conversation with a welcome message
+    if (this.voiceConnected && this.voice) {
+      await this.voice.speak("Hello! I'm here to help you with math. What grade are you in, and how comfortable do you feel with math?");
+    }
   }
 
   shouldTransitionToQuestionPresenter(message, response) {
@@ -75,4 +119,4 @@ class WelcomerAgent extends Agent {
   }
 }
 
-module.exports = { WelcomerAgent };
+export { WelcomerAgent };

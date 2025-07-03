@@ -1,7 +1,7 @@
-const { WelcomerAgent } = require('./agents/welcomer');
-const { QuestionPresenterAgent } = require('./agents/question-presenter');
-const { StepByStepTutorAgent } = require('./agents/step-by-step-tutor');
-const { getMicrophoneStream, playAudio } = require('@mastra/node-audio');
+import { WelcomerAgent } from './agents/welcomer.js';
+import { QuestionPresenterAgent } from './agents/question-presenter.js';
+import { StepByStepTutorAgent } from './agents/step-by-step-tutor.js';
+import { Readable } from 'stream';
 
 class TutoringOrchestrator {
   constructor() {
@@ -25,6 +25,7 @@ class TutoringOrchestrator {
         startTime: new Date()
       },
       socket: socket,
+      voiceMode: true,
       audioStream: null
     };
     
@@ -33,17 +34,37 @@ class TutoringOrchestrator {
     // Start with welcomer agent
     await this.switchToAgent(sessionId, 'welcomer');
     
-    // Initialize audio streaming
+    // Initialize voice connection for the current agent
     try {
-      sessionState.audioStream = await getMicrophoneStream();
-      this.setupAudioHandling(sessionId, sessionState.audioStream);
+      const currentAgent = this.agents['welcomer'];
+      await currentAgent.initializeVoice(socket);
+      
+      // Create audio stream for continuous audio input
+      sessionState.audioStream = this.createAudioStream(sessionId);
+      
+      // Set up agent transition handler
+      socket.on('agent-transition', async (data) => {
+        await this.handleAgentTransition(sessionId, data);
+      });
+      
+      // Start the conversation after a short delay to ensure connection is stable
+      setTimeout(async () => {
+        try {
+          await currentAgent.startConversation();
+        } catch (error) {
+          console.error('Error starting conversation:', error);
+        }
+      }, 1000);
+      
+      console.log('Voice mode enabled for session', sessionId);
     } catch (error) {
-      console.error('Error setting up audio:', error);
+      console.error('Error setting up voice:', error);
+      sessionState.voiceMode = false;
+      // Notify frontend about voice setup failure
+      socket.emit('error', { 
+        message: 'Voice setup failed. Please try again or check your microphone permissions.' 
+      });
     }
-    
-    // Send welcome message
-    const welcomeMessage = "Hello! I'm here to help you with math. What grade are you in, and how comfortable do you feel with math?";
-    await this.sendResponse(sessionId, welcomeMessage, 'welcomer');
     
     return sessionState;
   }
@@ -74,47 +95,67 @@ class TutoringOrchestrator {
     console.log(`Session ${sessionId}: Switched from ${previousAgent} to ${agentName}`);
   }
 
-  async handleMessage(sessionId, message) {
+  async handleAgentTransition(sessionId, data) {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      throw new Error('Session not found');
+      return;
     }
+
+    // Switch to the next agent
+    await this.switchToAgent(sessionId, data.nextAgent);
     
-    const currentAgent = this.agents[session.currentAgent];
-    if (!currentAgent) {
-      throw new Error(`Agent ${session.currentAgent} not found`);
-    }
-    
-    try {
-      // Process message with current agent
-      const result = await currentAgent.processMessage(message, session.context);
-      
-      // Update session context
-      session.context = result.context;
-      
-      // Handle agent transition if needed
-      if (result.shouldTransition && result.nextAgent) {
-        await this.switchToAgent(sessionId, result.nextAgent);
+    // Initialize voice for the new agent
+    if (session.voiceMode) {
+      try {
+        const newAgent = this.agents[data.nextAgent];
+        await newAgent.initializeVoice(session.socket);
         
-        // If switching to question presenter and it's the first time, let it generate its first problem
-        if (result.nextAgent === 'question-presenter' && result.context.assessmentComplete) {
-          const nextAgent = this.agents[result.nextAgent];
-          const followupResult = await nextAgent.processMessage('', result.context);
-          await this.sendResponse(sessionId, followupResult.response, result.nextAgent);
-          return;
+        // Reconnect the audio stream to the new agent
+        if (session.audioStream && !session.audioStream.destroyed) {
+          newAgent.voice.send(session.audioStream).catch(error => {
+            console.error(`Error reconnecting audio stream to ${data.nextAgent}:`, error);
+          });
         }
+        
+        // Start conversation with context
+        if (data.nextAgent === 'question-presenter') {
+          session.context.assessmentComplete = true;
+          await newAgent.startConversation(session.context);
+        } else if (data.nextAgent === 'step-by-step-tutor') {
+          await newAgent.startConversation(session.context);
+        }
+      } catch (error) {
+        console.error(`Error transitioning to ${data.nextAgent}:`, error);
       }
-      
-      // Send response to frontend
-      await this.sendResponse(sessionId, result.response, session.currentAgent);
-      
-    } catch (error) {
-      console.error(`Error processing message for session ${sessionId}:`, error);
-      session.socket.emit('error', { 
-        message: 'Sorry, I encountered an error. Please try again.',
-        error: error.message 
-      });
     }
+  }
+
+  async handleMessage(sessionId, message) {
+    // Text messages are no longer processed since we're using voice-only mode
+    // This method is kept for backwards compatibility but does nothing
+    console.log(`Text message received for session ${sessionId} but system is voice-only: ${message}`);
+  }
+
+  createAudioStream(sessionId) {
+    const audioStream = new Readable({
+      read() {
+        // No-op: data is pushed externally
+      }
+    });
+
+    // Set up the stream to forward audio to the current agent
+    const session = this.sessions.get(sessionId);
+    if (session && session.voiceMode) {
+      const currentAgent = this.agents[session.currentAgent];
+      if (currentAgent && currentAgent.voiceConnected) {
+        // Start sending the stream to the agent's voice connection
+        currentAgent.voice.send(audioStream).catch(error => {
+          console.error(`Error sending audio stream for session ${sessionId}:`, error);
+        });
+      }
+    }
+
+    return audioStream;
   }
 
   async handleAudio(sessionId, audioData) {
@@ -123,70 +164,28 @@ class TutoringOrchestrator {
       throw new Error('Session not found');
     }
     
-    try {
-      // Process audio with current agent's voice capabilities
-      const currentAgent = this.agents[session.currentAgent];
-      
-      if (currentAgent.voice) {
-        // Use Mastra's voice processing
-        const transcription = await currentAgent.voice.processAudio(audioData);
-        
-        if (transcription && transcription.text) {
-          // Process the transcribed text as a regular message
-          await this.handleMessage(sessionId, transcription.text);
-          
-          // Send transcription to frontend for display
-          session.socket.emit('transcription', {
-            text: transcription.text,
-            speaker: 'student'
-          });
-        }
-      }
-    } catch (error) {
-      console.error(`Error processing audio for session ${sessionId}:`, error);
-    }
-  }
-
-  async sendResponse(sessionId, response, agentName) {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
+    if (!session.voiceMode) {
+      console.log(`Audio data received for session ${sessionId} but voice mode is disabled`);
       return;
     }
     
-    // Send text response to frontend
-    session.socket.emit('agent-response', {
-      text: response,
-      agent: agentName,
-      timestamp: new Date(),
-      agentInfo: this.getAgentInfo(agentName)
-    });
-    
-    // Generate and send audio response
     try {
-      const agent = this.agents[agentName];
-      if (agent.voice) {
-        const audioResponse = await agent.voice.generateSpeech(response);
-        
-        if (audioResponse) {
-          session.socket.emit('audio-response', {
-            audioData: audioResponse,
-            agent: agentName
-          });
-          
-          // Play audio on server side if needed
-          // await playAudio(audioResponse);
-        }
+      // Push audio data to the continuous stream
+      if (session.audioStream && !session.audioStream.destroyed) {
+        const audioBuffer = Buffer.from(audioData);
+        session.audioStream.push(audioBuffer);
       }
     } catch (error) {
-      console.error(`Error generating audio response:`, error);
+      console.error(`Error processing audio for session ${sessionId}:`, error);
+      session.socket.emit('error', { 
+        message: 'Error processing audio input',
+        error: error.message 
+      });
     }
-    
-    // Send transcription for display
-    session.socket.emit('transcription', {
-      text: response,
-      speaker: agentName
-    });
   }
+
+  // Response sending is now handled by voice events in agents
+  // This method is no longer needed but kept for backwards compatibility
 
   setupAudioHandling(sessionId, audioStream) {
     audioStream.on('data', (audioData) => {
@@ -230,7 +229,8 @@ class TutoringOrchestrator {
     const session = this.sessions.get(sessionId);
     if (session) {
       // Clean up audio stream
-      if (session.audioStream) {
+      if (session.audioStream && !session.audioStream.destroyed) {
+        session.audioStream.push(null); // End the stream
         session.audioStream.destroy();
       }
       
@@ -265,4 +265,4 @@ class TutoringOrchestrator {
   }
 }
 
-module.exports = { TutoringOrchestrator };
+export { TutoringOrchestrator };

@@ -1,15 +1,15 @@
-require('dotenv').config();
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const cors = require('cors');
-const { TutoringOrchestrator } = require('./orchestrator');
+import 'dotenv/config';
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import { TutoringOrchestrator } from './orchestrator.js';
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
+const io = new Server(server, {
   cors: {
-    origin: "http://localhost:3001",
+    origin: "http://localhost:3000",
     methods: ["GET", "POST"]
   }
 });
@@ -40,6 +40,20 @@ io.on('connection', (socket) => {
       await orchestrator.handleAudio(socket.id, audioData);
     } catch (error) {
       console.error('Error handling audio:', error);
+      socket.emit('error', { message: 'Error processing audio' });
+    }
+  });
+
+  socket.on('toggle-voice-mode', async (enabled) => {
+    try {
+      const session = orchestrator.getSessionInfo(socket.id);
+      if (session) {
+        session.voiceMode = enabled;
+        socket.emit('voice-mode-changed', { enabled });
+        console.log(`Voice mode ${enabled ? 'enabled' : 'disabled'} for session ${socket.id}`);
+      }
+    } catch (error) {
+      console.error('Error toggling voice mode:', error);
     }
   });
 
@@ -66,7 +80,7 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`Math Tutoring Server running on port ${PORT}`);
 });
